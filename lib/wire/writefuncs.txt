@@ -1,0 +1,44 @@
+--@name wirelink writefuncs
+--@author Kanderman
+--@server
+
+local function conv(vec)
+    local r = math.clamp(floor(vec[1]/28),0,9)
+    local g = math.clamp(floor(vec[2]/28),0,9)
+    local b = math.clamp(floor(vec[3]/28),0,9)
+    
+    return math.floor(r)*100+math.floor(g)*10+math.floor(b)
+end
+
+function writeString(link, str, X, Y, textcolor, bgcolor, Flash)
+    
+    if !isnumber(textcolor)then textcolor = conv(textcolor) end
+    if !isnumber(bgcolor) then bgcolor = conv(bgcolor) end
+    
+    textcolor = math.clamp(math.floor(textcolor), 0, 999)
+    bgcolor = math.clamp(math.floor(bgcolor), 0, 999)
+    Flash = Flash ~= 0 and 1 or 0
+    local Params = Flash*1000000 + bgcolor*1000 + textcolor
+    
+    local Xorig = X
+    for i = 1,#str do
+    local Byte = string.byte(str,i)
+    
+    if Byte == 10 then
+        Y = Y+1
+        X = Xorig
+    else
+        if X >= 30 then
+        X = 0
+        Y = Y + 1
+    end
+    
+    local Address = 2*(Y*30+(X))
+    
+    X = X + 1
+        if Address>=1080 or Address<0 then return end
+            link[Address] = Byte
+            link[Address+1] = Params
+        end
+    end
+end
