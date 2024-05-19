@@ -1,0 +1,35 @@
+--@name FFT decoder
+--@author Kanderman
+--@client
+
+function fftToPcm(data, sampleRate, viewOffset, steps, mul)
+    local pcm = {}
+    
+    local size = #data
+    
+    local sizeDiv = 1/size
+    
+    local stepsDiv = 1/steps
+    
+    local totalTime = size/sampleRate
+    
+    local freqs = {}
+    
+    for freq = 2, size do
+        freqs[freq] = 6.283*(freq-1)*sizeDiv*sampleRate*totalTime
+    end
+    
+    for step = 1, steps do
+        local val = 0
+        
+        local progress = step*stepsDiv + viewOffset
+        
+        for sample = 2, size do
+            val = val + math.sin(freqs[sample]*progress)*data[sample]
+        end
+        
+        pcm[step] = (val*sizeDiv*mul)/(0.53+math.cos(6.283*progress)*0.47)
+    end
+    
+    return pcm
+end

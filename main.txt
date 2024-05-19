@@ -1,0 +1,351 @@
+--@name Jukebox V0.2
+--@author Kanderman
+--@shared
+--@include lib/music/fft_decoder.txt
+--@include lib/wire/writefuncs.txt
+
+if SERVER then
+    require("lib/wire/writefuncs.txt")
+    
+    wire.adjustInputs({"QueueScreen"}, {"entity"})
+    
+    chip():isWeldedTo():linkComponent(chip())
+    chip():setColor(Color(0,0,0,0))
+    
+    local songQueue = {}
+    
+    local songLen = 0
+    
+    local songStartT = 0
+    
+    local ltqsu = 0
+    
+    local playing = false
+    
+    local function chathandler(ply, msg)
+        local msgData = string.split(msg, " ")
+        if msgData[1] == "/vol" then
+            local aha = tonumber(msgData[2])
+            if aha == nil then
+                aha = 0
+            end
+            net.start("setting_set")
+            net.writeString("vol")
+            net.writeFloat(aha*0.01)
+            net.send(ply)
+        elseif msgData[1] == "/quota" then
+            local aha = tonumber(msgData[2])
+            if aha == nil then
+                aha = 40
+            end
+            net.start("setting_set")
+            net.writeString("quota")
+            net.writeFloat(math.clamp(aha*0.01, 0, 0.8))
+            net.send(ply)
+        elseif msgData[1] == "/play" then
+            local songd = {}
+            local breh = msgData[2]
+            local s, _, _ = string.find(breh, "?", 1)
+            
+            if s ~= nil then
+                breh = string.sub(breh, 1, s - 1)
+            end
+            
+            local thing = string.split(breh, "/")
+            
+            songd.name = string.stripExtension(thing[#thing])
+            songd.req = ply:getName()
+            songd.url = breh
+            songQueue[#songQueue + 1] = songd
+        elseif msgData[1] == "/skip" then
+            if playing then
+                table.remove(songQueue, 1)
+                playing = false
+            end
+            if songQueue[1] ~= nil then
+                net.start("song_cmd")
+                net.writeString("play")
+                net.writeTable(songQueue[1])
+                net.send()
+                net.start("update")
+                net.writeString("queue")
+                net.writeTable(songQueue)
+                net.send()
+                playing = true
+                songLen = 10
+                songStartT = timer.curtime()
+            end
+        end
+    end
+    
+    local function update()
+        if timer.curtime() > songStartT + songLen then
+            if playing then
+                table.remove(songQueue, 1)
+                playing = false
+            end
+            if songQueue[1] ~= nil then
+                net.start("song_cmd")
+                net.writeString("play")
+                net.writeTable(songQueue[1])
+                net.send()
+                net.start("update")
+                net.writeString("queue")
+                net.writeTable(songQueue)
+                net.send()
+                playing = true
+                songLen = 10
+                songStartT = timer.curtime()
+            end
+        end
+        if timer.curtime() > ltqsu + 2 and wire.ports["QueueScreen"]:isValid() then
+            ltqsu = timer.curtime()
+            
+            local queueScreen = wire.getWirelink(wire.ports["QueueScreen"])
+            
+            for x = 1, 18 do
+                local song = songQueue[x]
+                if song == nil then
+                    song = {}
+                    song.name = ""
+                end
+                if x == 1 then
+                    for i = 0, 29 do
+                        local c = 333
+                        if i <= ((timer.curtime() - songStartT)/songLen)*30 then c = 059 end
+                        writeString(queueScreen, string.format("%d: %s                           ", x, song.name)[i+1], i, x - 1, 999, c, 0)
+                    end
+                else
+                    writeString(queueScreen, string.format("%d: %s                           ", x, song.name), 0, x - 1, 999, 000, 0)
+                end
+            end
+        end
+    end
+    
+    if wire.ports["QueueScreen"]:isValid() then
+        local queueScreen = wire.getWirelink(wire.ports["QueueScreen"])
+        
+        queueScreen[2041] = 1
+        queueScreen[2041] = 0
+    end
+    
+    hook.add("think", "update", update)
+    
+    hook.add("PlayerSay", "chatcmds", chathandler)
+    
+    net.receive("songLength", function() 
+        songLen = net.readFloat()
+        songStartT = timer.curtime()
+    end)
+else
+    require("lib/music/fft_decoder.txt")
+    
+    local settings = {}
+    
+    settings.volume = 0.25
+    
+    settings.quota = 0.4
+    
+    local queue = {}
+    
+    local songData = {}
+    
+    songData.name = "none"
+    
+    songData.req = "unknown"
+    
+    songData.url = ""
+    
+    local song = nil
+    
+    local steps = 50
+    
+    local mul = 50
+    
+    local pcm = {}
+    
+    local fft = {}
+    
+    local loudness = 1
+    
+    local function customSoundFade( SoundObject, Minimum, Maximum, Distance, MaxVolume )
+    
+        SoundObject:setFade( Maximum, Maximum )
+    
+        local Max = Maximum - math.clamp( Minimum, 0, Maximum - 1 )
+    
+        local SetVolume = 1 - ( math.clamp( Distance - Minimum, 0, Max ) / Max )
+    
+        local Volume = math.clamp( SetVolume * MaxVolume, 0, MaxVolume )
+    
+        SoundObject:setVolume( Volume )
+        SoundObject:setPos(chip():getPos())
+    end
+    
+    local function draw3DCircle(pos, radius, resol)
+        local be = 1/resol
+        for t = 1, resol do
+            render.draw3DLine(pos + Vector(0,radius,0):rotateAroundAxis(Vector(0,0,1), 360*(t*be)), pos + Vector(0,radius,0):rotateAroundAxis(Vector(0,0,1), 360*((t+1)*be)))
+        end
+    end
+    
+    local function drawfunc()        
+        --sound data
+        if song ~= nil then 
+            if song:isValid() then
+                fft = song:getFFT(0)
+                pcm = fftToPcm(fft, 44100, 0.5, steps, mul)
+                
+                local l, r = song:getLevels()
+                
+                --loudness = math.lerp(0.25, loudness, (l+r)*0.33)
+            else
+                for x = 1, steps do
+                    pcm[x] = 0
+                end
+            end
+        else
+            for x = 1, steps do
+                pcm[x] = 0
+            end
+        end
+        
+        --background
+        
+        render.setColor(Color(40,40,40)*0.8)
+        
+        render.draw3DQuad(Vector(0,0,0), Vector(50,0,200), Vector(50,512,200), Vector(0,512,0))
+        render.draw3DQuad(Vector(468,512,200), Vector(468,0,200), Vector(512,0,0), Vector(512,512,0))
+        
+        render.setColor(Color(40,40,40)*0.9)
+        
+        render.draw3DQuad(Vector(50,0,200), Vector(468,0,200), Vector(468,512,200), Vector(50,512,200))
+        
+        render.setColor(Color(40,40,40)*0.7)
+        
+        render.draw3DQuad(Vector(0,0,0), Vector(512,0,0), Vector(468,0,200), Vector(50,0,200))
+        
+        render.setColor(Color(40,40,40))
+        
+        render.draw3DQuad(Vector(0,512,0), Vector(50,512,200), Vector(468,512,200), Vector(512,512,0))
+        
+        --visualiser
+        
+        local ld = 0
+        
+        for k = 1,#fft do
+            local v = fft[k]
+            render.setColor(Color(190,1-v*2,1):hsvToRGB())
+            render.draw3DBox(Vector(k*4 - 2,512,0), Angle(0,0,0), Vector(-1.5,-5 - v*440,10), Vector(1.5,-5,0))
+            if v > 64 then continue end
+            ld = ld + v*((64-v)/64)
+        end
+        
+        loudness = math.lerp(0.125, loudness, ld/6)
+        
+        render.setColor(Color(255,255,255))
+        
+        local sp = 1/(steps-1)
+        
+        for p = 1, steps - 1 do
+            render.draw3DLine(Vector(128+(p-1)*sp*256, 256 + pcm[p]*128, 60*(1-loudness)), Vector(128+p*sp*256, 256 + pcm[p+1]*128, 60*(1-loudness)))
+        end
+        
+        render.setColor(Color(0,212,255))
+        draw3DCircle(Vector(256, 256, 50*(1-loudness)), 128*(1+loudness*0.15), 32)
+        
+        render.setColor(Color(0,212,255)*0.8)
+        draw3DCircle(Vector(256, 256, 30*(1-loudness)), 132*(1+loudness*0.165), 32)
+        
+        render.setColor(Color(0,212,255)*0.6)
+        draw3DCircle(Vector(256, 256, 15*(1-loudness)), 138*(1+loudness*0.18), 32)
+        
+        render.setColor(Color(0,212,255)*0.4)
+        draw3DCircle(Vector(256, 256, 0), 146*(1+loudness*0.2), 32)
+        
+        --render.drawCircle(256, 256, 128)
+        --render.drawCircle(256, 256, 130)
+        --render.drawCircle(256, 256, 132)
+        
+        --song info
+        
+        render.setColor(Color(255,255,255))
+        render.setFont("DermaLarge")
+        render.drawText(10, 10, string.format("Song: %s\nBy: %s", songData.name, songData.req))
+        
+        --special info
+        
+        render.setColor(Color(255*(1-steps/800),255*(steps/800),0))
+        render.setFont("DermaDefault")
+        render.drawText(10,65, string.format("Line resolution: %d", steps))
+        
+        --command info
+        
+        render.setColor(Color(255,255,255))
+        render.drawText(10,450, "Chat commands:\n/play {url} (queues a soundfile from url)\n/vol {0-200} (sets the volume for you)\n/quota {0-100} (sets the cpu usage target)")
+        
+        steps = math.floor(math.clamp(steps + 1500*(cpuMax()*settings.quota - cpuUsed()), 8, 800))
+    end
+    
+    local function songStart(Musix, error)
+        if error == 0 then
+            song = Musix
+            song:play()
+            song:setPos(chip():getPos())
+            song:setLooping(false)
+            
+            hook.add("think", "updatesounds", function() 
+                customSoundFade(song, 250, 750, player():getShootPos():getDistance( chip():getPos() ), settings.volume)
+                if song:getTime() >= song:getLength() then
+                    song:stop()
+                    hook.remove("think", "updatesounds")
+                    songData.name = "none"
+                    
+                    songData.req = "unknown"
+                    
+                    songData.url = ""
+                end
+            end)
+            if player() ~= owner() then return end
+            net.start("songLength")
+            net.writeFloat(song:getLength())
+            net.send()
+        elseif player() == owner() then
+            net.start("songLength")
+            net.writeFloat(0)
+            net.send()
+        end
+    end
+    
+    local function netHandler(name)
+        if name == "setting_set" then
+            local sett = net.readString()
+            if sett == "vol" then
+                settings.volume = net.readFloat()
+            elseif sett == "quota" then
+                settings.quota = net.readFloat()
+            end
+        elseif name == "song_cmd" then
+            local cmd = net.readString()
+            if cmd == "play" then
+                songData = net.readTable()
+                if song ~= nil then
+                    if song:isValid() then
+                        song:stop()
+                        hook.remove("think", "updatesounds")
+                    end
+                end
+                try(function() bass.loadURL(songData.url, "3d noblock", songStart) end)
+            end
+        elseif name == "update" then
+            local type = net.readString()
+            if type == "queue" then
+                queue = net.readTable()
+            end
+        end
+    end
+    
+    hook.add("render" , "screendraw", drawfunc)
+    
+    hook.add("net", "recievedata", netHandler)
+end
